@@ -1,8 +1,13 @@
 ﻿using Employee_Leave.Data;
 using Employee_Leave.DTOs;
 using Employee_Leave.Models;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
+using System.Text;
 
 namespace Employee_Leave.Controllers
 {
@@ -11,18 +16,21 @@ namespace Employee_Leave.Controllers
     public class EmployeeController : ControllerBase
     {
         private readonly ApplicationDbContext con;
+        private readonly IConfiguration _configuration;
 
-        public EmployeeController(ApplicationDbContext context)
+        public EmployeeController(
+            ApplicationDbContext context,
+            IConfiguration configuration)
         {
             con = context;
+            _configuration = configuration;
         }
 
-
+        // ---------------- EMPLOYEE ----------------
 
         [HttpPost("employee/add")]
         public IActionResult AddEmployee(EmployeeCreateDto dto)
         {
-            
             bool exists = con.Employees.Any(e =>
                 e.Name == dto.Name &&
                 e.Role == dto.Role);
@@ -43,15 +51,31 @@ namespace Employee_Leave.Controllers
             return Ok("Employee added successfully");
         }
 
-
-
         [HttpGet("employee")]
         public IActionResult GetEmployees()
         {
             return Ok(con.Employees.ToList());
         }
 
+        [HttpPut("employee/deactivate/{employeeId}")]
+        public IActionResult DeactivateEmployee(int employeeId)
+        {
+            var employee = con.Employees.Find(employeeId);
 
+            if (employee == null)
+                return NotFound("Employee not found");
+
+            if (!employee.IsActive)
+                return BadRequest("Employee already inactive");
+
+            employee.IsActive = false;
+            con.SaveChanges();
+
+            return Ok("Employee deactivated successfully");
+        }
+
+        // ---------------- LEAVE ----------------
+        [Authorize]
         [HttpPost("leave/apply")]
         public IActionResult ApplyLeave(ApplyLeaveDto dto)
         {
@@ -86,21 +110,19 @@ namespace Employee_Leave.Controllers
             return Ok("Leave applied successfully");
         }
 
-
         [HttpGet("leave")]
         public IActionResult GetAllLeaves()
         {
             return Ok(con.LeaveRequests.ToList());
         }
 
-
+        [Authorize(Roles = "Manager")]
         [HttpPut("leave/approve-reject/{leaveId}")]
         public IActionResult ApproveRejectLeave(
-        int leaveId,
-        [FromQuery] string action,
-        [FromHeader] string role)
+            int leaveId,
+            [FromQuery] string action,
+            [FromHeader] string role)
         {
-           
             if (role != "Manager")
                 return Unauthorized("Only managers can approve or reject leave");
 
@@ -121,15 +143,14 @@ namespace Employee_Leave.Controllers
             return Ok($"Leave {leave.Status} successfully");
         }
 
-
         [HttpPut("leave/cancel/{leaveId}")]
         public IActionResult CancelLeave(
-        int leaveId,
-        [FromHeader] int employeeId)
+            int leaveId,
+            [FromHeader] int employeeId)
         {
-            var leave = con.LeaveRequests
-                .FirstOrDefault(l => l.LeaveRequestId == leaveId &&
-                                     l.EmployeeId == employeeId);
+            var leave = con.LeaveRequests.FirstOrDefault(l =>
+                l.LeaveRequestId == leaveId &&
+                l.EmployeeId == employeeId);
 
             if (leave == null)
                 return NotFound("Leave request was not found");
@@ -143,7 +164,9 @@ namespace Employee_Leave.Controllers
             return Ok("Leave cancelled successfully");
         }
 
+        // ---------------- REPORTS ----------------
 
+        [Authorize(Roles = "HR")]
         [HttpGet("leave/report/total-leaves")]
         public IActionResult GetTotalLeavesPerEmployee()
         {
@@ -160,7 +183,6 @@ namespace Employee_Leave.Controllers
             return Ok(report);
         }
 
-
         [HttpGet("leave/report/status-summary")]
         public IActionResult GetLeaveStatusSummary()
         {
@@ -176,22 +198,49 @@ namespace Employee_Leave.Controllers
             return Ok(report);
         }
 
-        [HttpPut("employee/deactivate/{employeeId}")]
-        public IActionResult DeactivateEmployee(int employeeId)
+        // ---------------- AUTH ----------------
+
+        [HttpPost("auth/login")]
+        public IActionResult Login(LoginDto dto)
         {
-            var employee = con.Employees.Find(employeeId);
+            var employee = con.Employees.FirstOrDefault(e =>
+                e.Name == dto.Name &&
+                e.Role == dto.Role &&
+                e.IsActive);
 
             if (employee == null)
-                return NotFound("Employee not found");
+                return Unauthorized("Invalid credentials");
 
-            if (!employee.IsActive)
-                return BadRequest("Employee already inactive");
+            var claims = new[]
+            {
+                new Claim(ClaimTypes.Name, employee.Name),
+                new Claim(ClaimTypes.Role, employee.Role),
+                new Claim("EmployeeId", employee.EmployeeId.ToString())
+            };
 
-            employee.IsActive = false;
-            con.SaveChanges();
+            var jwtKey = _configuration["Jwt:Key"]
+                ?? throw new InvalidOperationException("JWT Key missing");
 
-            return Ok("Employee deactivated successfully");
+            var key = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(jwtKey)
+            );
+
+            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+
+            var token = new JwtSecurityToken(
+                issuer: _configuration["Jwt:Issuer"],
+                audience: _configuration["Jwt:Audience"],
+                claims: claims,
+                expires: DateTime.Now.AddMinutes(
+                    Convert.ToDouble(_configuration["Jwt:DurationInMinutes"])
+                ),
+                signingCredentials: creds
+            );
+
+            return Ok(new
+            {
+                token = new JwtSecurityTokenHandler().WriteToken(token)
+            });
         }
-
     }
 }
