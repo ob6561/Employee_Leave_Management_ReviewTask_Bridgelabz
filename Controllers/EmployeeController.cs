@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace Employee_Leave.Controllers
@@ -15,38 +16,37 @@ namespace Employee_Leave.Controllers
     [Route("api")]
     public class EmployeeController : ControllerBase
     {
-        private readonly ApplicationDbContext con;
+        private readonly ApplicationDbContext _context;
         private readonly IConfiguration _configuration;
 
-        public EmployeeController(
-            ApplicationDbContext context,
-            IConfiguration configuration)
+        public EmployeeController(ApplicationDbContext context, IConfiguration configuration)
         {
-            con = context;
+            _context = context;
             _configuration = configuration;
         }
 
-        // ---------------- EMPLOYEE ----------------
+        // ====================== EMPLOYEE ======================
 
         [HttpPost("employee/add")]
         public IActionResult AddEmployee(EmployeeCreateDto dto)
         {
-            bool exists = con.Employees.Any(e =>
-                e.Name == dto.Name &&
-                e.Role == dto.Role);
+            bool exists = _context.Employees.Any(e =>
+                e.Name.ToLower() == dto.Name.ToLower() &&
+                e.Role.ToLower() == dto.Role.ToLower());
 
             if (exists)
                 return BadRequest("Employee already exists");
 
             var employee = new Employee
             {
-                Name = dto.Name,
-                Role = dto.Role,
-                IsActive = dto.IsActive
+                Name = dto.Name.Trim(),
+                Role = dto.Role.Trim(),
+                IsActive = dto.IsActive,
+                PasswordHash = BCrypt.Net.BCrypt.HashPassword(dto.Password)
             };
 
-            con.Employees.Add(employee);
-            con.SaveChanges();
+            _context.Employees.Add(employee);
+            _context.SaveChanges();
 
             return Ok("Employee added successfully");
         }
@@ -54,13 +54,13 @@ namespace Employee_Leave.Controllers
         [HttpGet("employee")]
         public IActionResult GetEmployees()
         {
-            return Ok(con.Employees.ToList());
+            return Ok(_context.Employees.ToList());
         }
 
         [HttpPut("employee/deactivate/{employeeId}")]
         public IActionResult DeactivateEmployee(int employeeId)
         {
-            var employee = con.Employees.Find(employeeId);
+            var employee = _context.Employees.Find(employeeId);
 
             if (employee == null)
                 return NotFound("Employee not found");
@@ -69,17 +69,18 @@ namespace Employee_Leave.Controllers
                 return BadRequest("Employee already inactive");
 
             employee.IsActive = false;
-            con.SaveChanges();
+            _context.SaveChanges();
 
             return Ok("Employee deactivated successfully");
         }
 
-        // ---------------- LEAVE ----------------
+        // ====================== LEAVE ======================
+
         [Authorize]
         [HttpPost("leave/apply")]
         public IActionResult ApplyLeave(ApplyLeaveDto dto)
         {
-            var employee = con.Employees.Find(dto.EmployeeId);
+            var employee = _context.Employees.Find(dto.EmployeeId);
 
             if (employee == null || !employee.IsActive)
                 return BadRequest("Invalid or inactive employee");
@@ -87,7 +88,7 @@ namespace Employee_Leave.Controllers
             if (dto.FromDate >= dto.ToDate)
                 return BadRequest("FromDate must be before ToDate");
 
-            bool overlapping = con.LeaveRequests.Any(l =>
+            bool overlapping = _context.LeaveRequests.Any(l =>
                 l.EmployeeId == dto.EmployeeId &&
                 l.Status == "Approved" &&
                 dto.FromDate <= l.ToDate &&
@@ -104,8 +105,8 @@ namespace Employee_Leave.Controllers
                 Status = "Pending"
             };
 
-            con.LeaveRequests.Add(leave);
-            con.SaveChanges();
+            _context.LeaveRequests.Add(leave);
+            _context.SaveChanges();
 
             return Ok("Leave applied successfully");
         }
@@ -113,20 +114,14 @@ namespace Employee_Leave.Controllers
         [HttpGet("leave")]
         public IActionResult GetAllLeaves()
         {
-            return Ok(con.LeaveRequests.ToList());
+            return Ok(_context.LeaveRequests.ToList());
         }
 
         [Authorize(Roles = "Manager")]
         [HttpPut("leave/approve-reject/{leaveId}")]
-        public IActionResult ApproveRejectLeave(
-            int leaveId,
-            [FromQuery] string action,
-            [FromHeader] string role)
+        public IActionResult ApproveRejectLeave(int leaveId, [FromQuery] string action)
         {
-            if (role != "Manager")
-                return Unauthorized("Only managers can approve or reject leave");
-
-            var leave = con.LeaveRequests.Find(leaveId);
+            var leave = _context.LeaveRequests.Find(leaveId);
 
             if (leave == null)
                 return NotFound("Leave request not found");
@@ -134,43 +129,46 @@ namespace Employee_Leave.Controllers
             if (leave.Status != "Pending")
                 return BadRequest("Leave already processed");
 
-            if (action != "Approve" && action != "Reject")
+            action = action.Trim().ToLower();
+
+            if (action != "approve" && action != "reject")
                 return BadRequest("Invalid action");
 
-            leave.Status = action == "Approve" ? "Approved" : "Rejected";
-            con.SaveChanges();
+            leave.Status = action == "approve" ? "Approved" : "Rejected";
+            _context.SaveChanges();
 
             return Ok($"Leave {leave.Status} successfully");
         }
 
+        [Authorize]
         [HttpPut("leave/cancel/{leaveId}")]
-        public IActionResult CancelLeave(
-            int leaveId,
-            [FromHeader] int employeeId)
+        public IActionResult CancelLeave(int leaveId)
         {
-            var leave = con.LeaveRequests.FirstOrDefault(l =>
+            int employeeId = int.Parse(User.FindFirst("EmployeeId")!.Value);
+
+            var leave = _context.LeaveRequests.FirstOrDefault(l =>
                 l.LeaveRequestId == leaveId &&
                 l.EmployeeId == employeeId);
 
             if (leave == null)
-                return NotFound("Leave request was not found");
+                return NotFound("Leave request not found");
 
             if (leave.Status != "Pending")
                 return BadRequest("Only pending leave can be cancelled");
 
             leave.Status = "Cancelled";
-            con.SaveChanges();
+            _context.SaveChanges();
 
             return Ok("Leave cancelled successfully");
         }
 
-        // ---------------- REPORTS ----------------
+        // ====================== REPORTS ======================
 
         [Authorize(Roles = "HR")]
         [HttpGet("leave/report/total-leaves")]
         public IActionResult GetTotalLeavesPerEmployee()
         {
-            var report = con.LeaveRequests
+            var report = _context.LeaveRequests
                 .Where(l => l.Status == "Approved")
                 .GroupBy(l => l.EmployeeId)
                 .Select(g => new
@@ -183,10 +181,11 @@ namespace Employee_Leave.Controllers
             return Ok(report);
         }
 
+        [Authorize(Roles = "HR")]
         [HttpGet("leave/report/status-summary")]
         public IActionResult GetLeaveStatusSummary()
         {
-            var report = con.LeaveRequests
+            var report = _context.LeaveRequests
                 .GroupBy(l => l.Status)
                 .Select(g => new
                 {
@@ -198,17 +197,23 @@ namespace Employee_Leave.Controllers
             return Ok(report);
         }
 
-        // ---------------- AUTH ----------------
+        // ====================== AUTH ======================
 
         [HttpPost("auth/login")]
         public IActionResult Login(LoginDto dto)
         {
-            var employee = con.Employees.FirstOrDefault(e =>
-                e.Name == dto.Name &&
-                e.Role == dto.Role &&
+            var employee = _context.Employees.FirstOrDefault(e =>
+                e.Name.ToLower() == dto.Name.Trim().ToLower() &&
                 e.IsActive);
 
             if (employee == null)
+                return Unauthorized("Invalid credentials");
+
+            bool validPassword = BCrypt.Net.BCrypt.Verify(
+                dto.Password,
+                employee.PasswordHash);
+
+            if (!validPassword)
                 return Unauthorized("Invalid credentials");
 
             var claims = new[]
@@ -218,14 +223,9 @@ namespace Employee_Leave.Controllers
                 new Claim("EmployeeId", employee.EmployeeId.ToString())
             };
 
-            var jwtKey = _configuration["Jwt:Key"]
-                ?? throw new InvalidOperationException("JWT Key missing");
-
             var key = new SymmetricSecurityKey(
-                Encoding.UTF8.GetBytes(jwtKey)
+                Encoding.UTF8.GetBytes(_configuration["Jwt:Key"]!)
             );
-
-            var creds = new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
 
             var token = new JwtSecurityToken(
                 issuer: _configuration["Jwt:Issuer"],
@@ -234,13 +234,76 @@ namespace Employee_Leave.Controllers
                 expires: DateTime.Now.AddMinutes(
                     Convert.ToDouble(_configuration["Jwt:DurationInMinutes"])
                 ),
-                signingCredentials: creds
+                signingCredentials: new SigningCredentials(
+                    key, SecurityAlgorithms.HmacSha256)
+            );
+
+            var accessToken = new JwtSecurityTokenHandler().WriteToken(token);
+
+            var refreshToken = GenerateRefreshToken();
+
+            _context.RefreshTokens.Add(new RefreshToken
+            {
+                Token = refreshToken,
+                EmployeeId = employee.EmployeeId,
+                Expires = DateTime.Now.AddDays(7)
+            });
+
+            _context.SaveChanges();
+
+            return Ok(new
+            {
+                accessToken,
+                refreshToken
+            });
+        }
+
+        [HttpPost("auth/refresh")]
+        public IActionResult RefreshToken(RefreshTokenDto dto)
+        {
+            var storedToken = _context.RefreshTokens
+                .Include(r => r.Employee)
+                .FirstOrDefault(r =>
+                    r.Token == dto.RefreshToken &&
+                    !r.IsRevoked &&
+                    r.Expires > DateTime.Now);
+
+            if (storedToken == null)
+                return Unauthorized("Invalid refresh token");
+
+            var employee = storedToken.Employee;
+
+            var claims = new[]
+            {
+                new Claim(ClaimTypes.Name, employee.Name),
+                new Claim(ClaimTypes.Role, employee.Role),
+                new Claim("EmployeeId", employee.EmployeeId.ToString())
+            };
+
+            var key = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(_configuration["Jwt:Key"]!)
+            );
+
+            var token = new JwtSecurityToken(
+                issuer: _configuration["Jwt:Issuer"],
+                audience: _configuration["Jwt:Audience"],
+                claims: claims,
+                expires: DateTime.Now.AddMinutes(15),
+                signingCredentials: new SigningCredentials(
+                    key, SecurityAlgorithms.HmacSha256)
             );
 
             return Ok(new
             {
-                token = new JwtSecurityTokenHandler().WriteToken(token)
+                accessToken = new JwtSecurityTokenHandler().WriteToken(token)
             });
+        }
+
+        // ====================== HELPERS ======================
+
+        private string GenerateRefreshToken()
+        {
+            return Convert.ToBase64String(RandomNumberGenerator.GetBytes(64));
         }
     }
 }
