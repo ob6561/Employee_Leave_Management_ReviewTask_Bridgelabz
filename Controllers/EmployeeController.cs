@@ -26,7 +26,7 @@ namespace Employee_Leave.Controllers
             _configuration = configuration;
         }
 
-        // ---------------- EMPLOYEE ----------------
+        
 
         [HttpPost("employee/add")]
         public IActionResult AddEmployee(EmployeeCreateDto dto)
@@ -74,7 +74,7 @@ namespace Employee_Leave.Controllers
             return Ok("Employee deactivated successfully");
         }
 
-        // ---------------- LEAVE ----------------
+        
         [Authorize]
         [HttpPost("leave/apply")]
         public IActionResult ApplyLeave(ApplyLeaveDto dto)
@@ -164,7 +164,7 @@ namespace Employee_Leave.Controllers
             return Ok("Leave cancelled successfully");
         }
 
-        // ---------------- REPORTS ----------------
+        
 
         [Authorize(Roles = "HR")]
         [HttpGet("leave/report/total-leaves")]
@@ -198,7 +198,7 @@ namespace Employee_Leave.Controllers
             return Ok(report);
         }
 
-        // ---------------- AUTH ----------------
+        
 
         [HttpPost("auth/login")]
         public IActionResult Login(LoginDto dto)
